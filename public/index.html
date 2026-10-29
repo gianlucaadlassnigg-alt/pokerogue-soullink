@@ -135,6 +135,11 @@ const RULES = {
   blockCatchAfterFirst: "Nach dem ersten Fang im Abschnitt ist das Ball-Menü gesperrt",
   biomeDupeClause: "In einem Biom, in dem man schon gefangen hat, darf man später nicht mehr fangen",
   waitAtBosses: "Vor Biom-Boss, Rivale, Top 4 und Champ auf den Partner warten",
+  startTogether: "Genau 3 Starter – der erste Kampf startet erst, wenn beide bereit sind",
+  endRunTogether: "Verliert einer, ist der Run des anderen auch vorbei",
+  speciesClause: "Keine Pokémon fangen, die der Partner hat, und keine toten Pokémon neu fangen",
+  shinyClause: "Shinys darf man immer fangen – dafür muss ein anderes Pokémon gehen",
+  forceSwitch: "Tote Pokémon im Kampf müssen ausgewechselt werden und sind gesperrt (auch für Beleber)",
   releaseOnPartnerDeath: "Partner-Pokémon stirbt → eigenes wird freigelassen",
   releaseOnPartnerGone: "Partner lässt frei / verliert sein Pokémon → eigenes auch",
   releaseIfPartnerMissed: "Partner fängt im Abschnitt nichts → eigenes Pokémon geht",
@@ -210,7 +215,9 @@ function playerCard(p, side) {
     <div class="pname">${side ? "" : `<span class="online ${p.online ? "on" : ""}"></span>`}${esc(p.name)}${side ? `<span class="online ${p.online ? "on" : ""}"></span>` : ""}</div>
     <div class="pmeta">${meta} · ${p.online ? "spielt gerade" : "zuletzt vor " + ago(p.lastSeen)}</div>
     <div class="stats"><div><b>${p.run?.wave ?? 0}</b>Welle</div><div><b>${alive}</b>im Team</div><div><b>${dead}</b>tot</div></div>
-    ${p.run?.waiting ? `<div class="status wait">⏳ Wartet vor „${esc(p.run.waiting.label)}“ (Welle ${p.run.waiting.wave})</div>` : ""}
+    ${p.run?.waiting ? `<div class="status wait">⏳ ${esc(p.run.waiting.label)}</div>` : ""}
+    ${p.run?.swapPending ? `<div class="status wait">✨ Shiny-Tausch offen</div>` : ""}
+    ${p.run?.over && p.run.endReason ? `<div class="status no">☠️ ${esc(p.run.endReason)}</div>` : ""}
     ${p.run && !p.run.over ? (p.run.catchBlocked ? `<div class="status no">🚫 Fangen gesperrt</div>` : `<div class="status yes">🎯 Darf hier fangen</div>`) : ""}</div>`;
 }
 

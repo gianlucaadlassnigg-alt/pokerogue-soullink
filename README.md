@@ -23,6 +23,13 @@ Soul-Link-Nuzlocke für zwei Spieler auf **pokerogue.net**:
 | **Fangsperre** | Nach dem ersten Fang im Abschnitt lässt sich das Ball-Menü nicht mehr öffnen. |
 | **Biom-Klausel** | Hast du in einem Biom schon gefangen, darfst du dort später nicht mehr fangen, auch wenn du wieder hinkommst. |
 | **Warten auf den Partner** | Vor dem Boss am Ende jedes Bioms (jede 10. Welle), vor Rivalen, Top 4 und Champ hält das Spiel an, bis der Partner auch dort ist. Im Overlay gibt es „Nicht warten, weiter“, falls er offline ist. |
+| **Gemeinsamer Start** | Jeder spielt mit genau 3 Startern, und ihr dürft keine gleichen Starter haben (auch keine aus derselben Entwicklungsreihe). Der erste Kampf beginnt erst, wenn beide so weit sind. |
+| **Gemeinsames Ende** | Verliert einer den Run, ist der Run des anderen sofort auch vorbei. |
+| **Species-Klausel** | Pokémon, die der Partner im Team hat (inklusive Vor- und Weiterentwicklungen), darf man nicht fangen. Pokémon, die schon gestorben sind, auch nicht. |
+| **Shiny-Klausel** | Shinys darf man immer fangen. Ist der Abschnitt schon belegt, muss man im Overlay wählen, wer dafür gehen muss. Bis dahin startet kein Kampf. Das Shiny übernimmt dann den Link des freigelassenen Pokémon. Der Partner verliert dadurch nichts. |
+| **Zwangswechsel** | Stirbt das Partner-Pokémon, während deins kämpft, geht automatisch das Wechsel-Menü auf. Kämpfen und Fangen sind gesperrt. Tote Pokémon lassen sich weder einwechseln noch mit Beleber o. ä. wiederbeleben. Ist niemand mehr da, ist der Run vorbei. |
+| **Belebersamen** | Ein Pokémon, das von einem Belebersamen gerettet wird, gilt nicht als tot. |
+| **Overlay** | Am Kopf (⋮⋮) verschieben, an der Ecke unten rechts größer oder kleiner ziehen. „↺ Position“ setzt es zurück. |
 | **Statistiken** | Die Website zeigt Runs, beste Welle, Fänge, Tode, längsten Überlebenden, höchstes Level und das tödlichste Biom. |
 
 Jede Regel könnt ihr auf der Website unter **Regeln** mit dem Raum-Passwort an- und ausschalten.

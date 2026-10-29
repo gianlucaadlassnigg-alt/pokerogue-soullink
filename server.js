@@ -20,6 +20,11 @@ const DEFAULT_SETTINGS = {
   blockCatchAfterFirst: true, // nach dem ersten Fang im Abschnitt ist das Ball-Menü gesperrt
   biomeDupeClause: true, // in einem Biom, in dem man schon gefangen hat, darf man später nicht mehr fangen
   waitAtBosses: true, // vor Biom-Boss, Rivale, Top 4 & Champ auf den Partner warten
+  endRunTogether: true, // verliert einer, ist der Run des anderen auch vorbei
+  speciesClause: true, // keine Pokémon, die der Partner hat, und keine toten Pokémon neu fangen
+  startTogether: true, // genau 3 Starter, und der erste Kampf startet erst, wenn beide bereit sind
+  shinyClause: true, // Shinys darf man immer fangen – dafür muss ein anderes Pokémon gehen
+  forceSwitch: true, // tote/verlinkte Pokémon im Kampf müssen ausgewechselt werden und sind gesperrt
   releaseOnPartnerDeath: true, // Partner-Pokémon stirbt -> eigenes wird freigelassen
   releaseOnPartnerGone: true, // Partner hat sein Pokémon freigelassen/verloren -> eigenes auch
   releaseIfPartnerMissed: true, // Partner hat im Abschnitt nichts gefangen -> eigenes Pokémon geht
@@ -78,6 +83,7 @@ function pushEvent(room, player, type, text) {
 
 // ---------------------------------------------------------------- Soul-Link-Logik
 function slotKey(m) {
+  if (m.slotKey) return m.slotKey;
   if (m.metWave == null || m.metWave <= 0) return `S${(m.starterIndex ?? 0) + 1}`;
   return `W${Math.ceil(m.metWave / 10)}`;
 }
@@ -95,6 +101,7 @@ function keyLabel(k) {
 function groupRun(run) {
   const groups = new Map();
   for (const m of run?.mons || []) {
+    if (m.status === "swapped" || (m.extra && !m.slotKey)) continue; // getauscht / Shiny wartet auf Tausch
     const k = slotKey(m);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(m);
@@ -118,9 +125,9 @@ function computeLinks(room) {
       let status;
       if (mon) status = mon.status; // alive | dead | gone
       else {
-        const segEnd = k[0] === "S" ? 0 : Number(k.slice(1)) * 10;
+        // Fehlende Starter zählen nie als „nicht gefangen“ – die Starter-Anzahl prüft das Spiel-Script.
         const wave = run?.wave || 0;
-        status = wave > segEnd && wave > 0 ? "missed" : "pending";
+        status = k[0] !== "S" && wave > Number(k.slice(1)) * 10 ? "missed" : "pending";
       }
       return { player: name, mon, status, duplicates: list.slice(1) };
     });
@@ -140,6 +147,9 @@ function releaseOrders(room, playerName, links) {
   const orders = [];
   const warnings = [];
   if (links.names.length < 2) return { orders, warnings };
+  // Hat der Partner schon verloren, endet der eigene Run sowieso – dann nichts mehr freilassen.
+  const partnerName = links.names.find((n) => n !== playerName);
+  if (s.endRunTogether && room.players[partnerName]?.run?.over) return { orders, warnings };
   for (const p of links.pairs) {
     const mine = p.slots.find((x) => x.player === playerName);
     const other = p.slots.find((x) => x.player !== playerName);
@@ -177,16 +187,22 @@ function sanitizeRun(run) {
     phase: String(run.phase || "").slice(0, 40),
     gameMode: String(run.gameMode || "").slice(0, 30),
     over: !!run.over,
+    lost: !!run.lost,
+    endReason: run.endReason ? String(run.endReason).slice(0, 160) : null,
+    swapPending: !!run.swapPending,
     startedAt: Number(run.startedAt) || Date.now(),
     readyWave: Number(run.readyWave) || 0,
     waiting:
       run.waiting && typeof run.waiting === "object"
-        ? { wave: Number(run.waiting.wave) || 0, label: String(run.waiting.label || "").slice(0, 60), since: Number(run.waiting.since) || Date.now() }
+        ? { wave: Number(run.waiting.wave) || 0, label: String(run.waiting.label || "").slice(0, 160), since: Number(run.waiting.since) || Date.now() }
         : null,
     catchBlocked: run.catchBlocked ? String(run.catchBlocked).slice(0, 120) : null,
     mons: mons.map((m) => ({
       id: Number(m.id),
       speciesId: Number(m.speciesId) || 0,
+      rootId: Number(m.rootId) || Number(m.speciesId) || 0,
+      extra: !!m.extra,
+      slotKey: m.slotKey && /^[SW]\d{1,3}$/.test(m.slotKey) ? m.slotKey : null,
       formIndex: Number(m.formIndex) || 0,
       name: String(m.name || "?").slice(0, 40),
       nick: m.nick ? String(m.nick).slice(0, 40) : null,
@@ -199,7 +215,7 @@ function sanitizeRun(run) {
       metBiome: Number(m.metBiome),
       metBiomeName: biomeName(Number(m.metBiome)),
       starterIndex: m.starterIndex == null ? null : Number(m.starterIndex),
-      status: ["alive", "dead", "gone"].includes(m.status) ? m.status : "alive",
+      status: ["alive", "dead", "gone", "swapped"].includes(m.status) ? m.status : "alive",
       goneReason: m.goneReason ? String(m.goneReason).slice(0, 120) : null,
       inParty: !!m.inParty,
       firstSeen: Number(m.firstSeen) || 0,
@@ -234,23 +250,26 @@ function diffEvents(room, player, prev, next) {
     const o = old.get(m.id);
     if (!o) {
       if (m.metWave > 0)
-        pushEvent(room, player, "catch", `fängt ${label(m)} (Welle ${m.metWave}, ${m.metBiomeName})`);
+        pushEvent(room, player, "catch", `${m.shiny ? "✨ fängt ein Shiny: " : "fängt "}${label(m)} (Welle ${m.metWave}, ${m.metBiomeName})`);
       continue;
     }
     if (o.status !== m.status) {
       if (m.status === "dead")
         pushEvent(room, player, "death", `💀 ${label(m)} ist gestorben (Welle ${m.diedWave ?? next.wave}, ${m.diedBiomeName ?? next.biomeName})`);
+      else if (m.status === "swapped")
+        pushEvent(room, player, "gone", `🔄 ${label(m)} ${m.goneReason || "wurde getauscht"}`);
       else if (m.status === "gone")
         pushEvent(room, player, "gone", `🕊️ ${label(m)} wurde freigelassen${m.goneReason ? ` – ${m.goneReason}` : ""}`);
     }
     if (o.name !== m.name && o.speciesId !== m.speciesId && m.status === "alive")
       pushEvent(room, player, "evo", `✨ ${o.nick || o.name} hat sich zu ${m.name} entwickelt`);
   }
-  if (!prev.over && next.over) pushEvent(room, player, "over", `☠️ Run vorbei auf Welle ${next.wave}`);
+  if (!prev.over && next.over)
+    pushEvent(room, player, "over", `☠️ Run vorbei auf Welle ${next.wave}${next.endReason ? ` – ${next.endReason}` : ""}`);
   if (!prev.waiting && next.waiting)
-    pushEvent(room, player, "wait", `⏳ wartet vor „${next.waiting.label}“ (Welle ${next.waiting.wave})`);
+    pushEvent(room, player, "wait", `⏳ Welle ${next.waiting.wave}: ${next.waiting.label}`);
   if (prev.waiting && !next.waiting && next.wave >= prev.waiting.wave)
-    pushEvent(room, player, "go", `⚔️ startet „${prev.waiting.label}“ (Welle ${prev.waiting.wave})`);
+    pushEvent(room, player, "go", `⚔️ geht weiter (Welle ${prev.waiting.wave})`);
 }
 
 // ---------------------------------------------------------------- Verlauf & Statistiken
@@ -408,6 +427,9 @@ async function handleApi(req, res, url) {
     const p = room.players[player];
     const run = sanitizeRun(body.run);
     if (run && run.runId) {
+      const same = p.run && p.run.runId === run.runId;
+      run.overAt = same && p.run.overAt ? p.run.overAt : run.over ? Date.now() : null;
+      if (run.over && run.lost && !(same && p.run.over && p.run.lost)) p.lastLossAt = Date.now();
       diffEvents(room, player, p.run, run);
       p.run = run;
     }
@@ -431,6 +453,17 @@ async function handleApi(req, res, url) {
             over: partner.run?.over,
             readyWave: partner.run?.readyWave || 0,
             waiting: partner.run?.waiting || null,
+            lastLossAt: partner.lastLossAt || null,
+            run: partner.run
+              ? {
+                  startedAt: partner.run.startedAt,
+                  over: partner.run.over,
+                  starters: partner.run.mons
+                    .filter((m) => m.starterIndex != null && m.status !== "swapped")
+                    .map((m) => ({ rootId: m.rootId, name: m.name })),
+                }
+              : null,
+            roots: [...new Set((partner.run?.mons || []).filter((m) => m.status === "alive" && m.inParty).map((m) => m.rootId))],
           }
         : null,
       pairs: links.pairs.map((pr) => ({
@@ -441,6 +474,11 @@ async function handleApi(req, res, url) {
         theirs: pr.slots.find((s) => s.player !== player) || null,
       })),
       release: orders,
+      deadRoots: [
+        ...new Set(
+          links.names.flatMap((n) => (room.players[n].run?.mons || []).filter((m) => m.status === "dead").map((m) => m.rootId)),
+        ),
+      ],
       warnings,
       settings: { ...DEFAULT_SETTINGS, ...room.settings },
     });

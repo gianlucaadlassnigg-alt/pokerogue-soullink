@@ -13,9 +13,13 @@ const PORT = Number(process.env.PORT) || 3000;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "data", "rooms.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const ONLINE_MS = 20_000;
-const MAX_BODY = 512 * 1024;
+const MAX_BODY = 1024 * 1024;
 
 const DEFAULT_SETTINGS = {
+  forceNickname: true, // nach dem Fangen muss ein Spitzname vergeben werden
+  blockCatchAfterFirst: true, // nach dem ersten Fang im Abschnitt ist das Ball-Menü gesperrt
+  biomeDupeClause: true, // in einem Biom, in dem man schon gefangen hat, darf man später nicht mehr fangen
+  waitAtBosses: true, // vor Biom-Boss, Rivale, Top 4 & Champ auf den Partner warten
   releaseOnPartnerDeath: true, // Partner-Pokémon stirbt -> eigenes wird freigelassen
   releaseOnPartnerGone: true, // Partner hat sein Pokémon freigelassen/verloren -> eigenes auch
   releaseIfPartnerMissed: true, // Partner hat im Abschnitt nichts gefangen -> eigenes Pokémon geht
@@ -174,6 +178,12 @@ function sanitizeRun(run) {
     gameMode: String(run.gameMode || "").slice(0, 30),
     over: !!run.over,
     startedAt: Number(run.startedAt) || Date.now(),
+    readyWave: Number(run.readyWave) || 0,
+    waiting:
+      run.waiting && typeof run.waiting === "object"
+        ? { wave: Number(run.waiting.wave) || 0, label: String(run.waiting.label || "").slice(0, 60), since: Number(run.waiting.since) || Date.now() }
+        : null,
+    catchBlocked: run.catchBlocked ? String(run.catchBlocked).slice(0, 120) : null,
     mons: mons.map((m) => ({
       id: Number(m.id),
       speciesId: Number(m.speciesId) || 0,
@@ -237,6 +247,70 @@ function diffEvents(room, player, prev, next) {
       pushEvent(room, player, "evo", `✨ ${o.nick || o.name} hat sich zu ${m.name} entwickelt`);
   }
   if (!prev.over && next.over) pushEvent(room, player, "over", `☠️ Run vorbei auf Welle ${next.wave}`);
+  if (!prev.waiting && next.waiting)
+    pushEvent(room, player, "wait", `⏳ wartet vor „${next.waiting.label}“ (Welle ${next.waiting.wave})`);
+  if (prev.waiting && !next.waiting && next.wave >= prev.waiting.wave)
+    pushEvent(room, player, "go", `⚔️ startet „${prev.waiting.label}“ (Welle ${prev.waiting.wave})`);
+}
+
+// ---------------------------------------------------------------- Verlauf & Statistiken
+function sanitizeHistory(list) {
+  if (!Array.isArray(list)) return null;
+  return list.slice(0, 30).map((r) => ({
+    runId: String(r.runId || "").slice(0, 64),
+    startedAt: Number(r.startedAt) || 0,
+    endedAt: Number(r.endedAt) || 0,
+    wave: Number(r.wave) || 0,
+    over: !!r.over,
+    mons: (Array.isArray(r.mons) ? r.mons.slice(0, 200) : []).map((m) => ({
+      name: String(m.name || "?").slice(0, 40),
+      nick: m.nick ? String(m.nick).slice(0, 40) : null,
+      speciesId: Number(m.speciesId) || 0,
+      shiny: !!m.shiny,
+      level: Number(m.level) || 0,
+      status: ["alive", "dead", "gone"].includes(m.status) ? m.status : "alive",
+      metWave: Number(m.metWave),
+      metBiome: Number(m.metBiome),
+      diedWave: m.diedWave == null ? null : Number(m.diedWave),
+      diedBiome: m.diedBiome == null ? null : Number(m.diedBiome),
+    })),
+  }));
+}
+
+function playerStats(p) {
+  const all = new Map();
+  for (const r of p.history || []) all.set(r.runId, r);
+  if (p.run?.runId) all.set(p.run.runId, p.run);
+  const runs = [...all.values()].filter((r) => r.mons?.length);
+  const mons = runs.flatMap((r) => r.mons.map((m) => ({ ...m, runWave: r.wave })));
+  const deaths = mons.filter((m) => m.status === "dead");
+  const caught = mons.filter((m) => m.metWave > 0);
+
+  const biomeCount = {};
+  for (const m of deaths) if (m.diedBiome != null) biomeCount[m.diedBiome] = (biomeCount[m.diedBiome] || 0) + 1;
+  const deadliest = Object.entries(biomeCount).sort((a, b) => b[1] - a[1])[0];
+
+  let survivor = null;
+  for (const m of mons) {
+    const start = Math.max(1, m.metWave || 1);
+    const end = m.status === "dead" ? m.diedWave ?? start : m.runWave;
+    const span = Math.max(0, (end || start) - start);
+    if (!survivor || span > survivor.waves) survivor = { name: m.nick || m.name, species: m.name, speciesId: m.speciesId, waves: span };
+  }
+  const top = mons.slice().sort((a, b) => b.level - a.level)[0];
+  const waves = runs.map((r) => r.wave || 0);
+  return {
+    runs: runs.length,
+    bestWave: waves.length ? Math.max(...waves) : 0,
+    avgWave: waves.length ? Math.round(waves.reduce((a, b) => a + b, 0) / waves.length) : 0,
+    catches: caught.length,
+    deaths: deaths.length,
+    shinies: mons.filter((m) => m.shiny).length,
+    deathsPerRun: runs.length ? Math.round((deaths.length / runs.length) * 10) / 10 : 0,
+    deadliestBiome: deadliest ? { name: biomeName(Number(deadliest[0])), count: deadliest[1] } : null,
+    survivor,
+    topLevel: top ? { name: top.nick || top.name, species: top.name, speciesId: top.speciesId, level: top.level } : null,
+  };
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -281,11 +355,23 @@ function publicRoom(roomId, room) {
     settings: { ...DEFAULT_SETTINGS, ...room.settings },
     players: links.names.map((n) => {
       const p = room.players[n];
-      return { name: n, online: now - p.lastSeen < ONLINE_MS, lastSeen: p.lastSeen, run: p.run };
+      return { name: n, online: now - p.lastSeen < ONLINE_MS, lastSeen: p.lastSeen, run: p.run, stats: playerStats(p) };
     }),
     pairs: links.pairs,
     events: room.events.slice(-120).reverse(),
-    history: room.history,
+    history: links.names
+      .flatMap((n) =>
+        (room.players[n].history || []).map((h) => ({
+          player: n,
+          runId: h.runId,
+          endedAt: h.endedAt,
+          wave: h.wave,
+          over: h.over,
+          deaths: h.mons.filter((m) => m.status === "dead").length,
+        })),
+      )
+      .sort((a, b) => b.endedAt - a.endedAt)
+      .slice(0, 20),
   };
 }
 
@@ -325,6 +411,8 @@ async function handleApi(req, res, url) {
       diffEvents(room, player, p.run, run);
       p.run = run;
     }
+    const hist = sanitizeHistory(body.history);
+    if (hist) p.history = hist;
     p.lastSeen = Date.now();
     save();
 
@@ -335,7 +423,15 @@ async function handleApi(req, res, url) {
     return send(res, 200, {
       ok: true,
       partner: partner
-        ? { name: partnerName, online: Date.now() - partner.lastSeen < ONLINE_MS, wave: partner.run?.wave, biomeName: partner.run?.biomeName, over: partner.run?.over }
+        ? {
+            name: partnerName,
+            online: Date.now() - partner.lastSeen < ONLINE_MS,
+            wave: partner.run?.wave,
+            biomeName: partner.run?.biomeName,
+            over: partner.run?.over,
+            readyWave: partner.run?.readyWave || 0,
+            waiting: partner.run?.waiting || null,
+          }
         : null,
       pairs: links.pairs.map((pr) => ({
         key: pr.key,

@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         PokeRogue Soul Link
 // @namespace    pokerogue-soullink
-// @version      1.0.0
+// @version      1.1.0
+// @updateURL    __SERVER_URL__/soullink.user.js
+// @downloadURL  __SERVER_URL__/soullink.user.js
 // @description  Soul-Link-Nuzlocke für zwei Spieler: liest den Run aus, synchronisiert mit eurem Server, zeigt die Paare im Spiel und lässt verlinkte Pokémon automatisch frei.
 // @match        https://pokerogue.net/*
 // @match        https://www.pokerogue.net/*
@@ -22,7 +24,18 @@
   const DEFAULT_SERVER = "__SERVER_URL__".startsWith("__") ? "" : "__SERVER_URL__";
   const SYNC_MS = 2000;
   const TICK_MS = 700;
-  const UI_MODE = { TITLE: 1, COMMAND: 2, MODIFIER_SELECT: 6, STARTER_SELECT: 10 };
+  const UI_MODE = { TITLE: 1, COMMAND: 2, BALL: 4, MODIFIER_SELECT: 6, STARTER_SELECT: 10, RENAME_POKEMON: 38 };
+  const ENCOUNTER_PHASES = ["EncounterPhase", "NextEncounterPhase", "NewBiomeEncounterPhase"];
+  const RULE_DEFAULTS = { forceNickname: true, blockCatchAfterFirst: true, biomeDupeClause: true, waitAtBosses: true };
+  const rule = (k) => (lastResp?.settings && k in lastResp.settings ? !!lastResp.settings[k] : RULE_DEFAULTS[k]);
+  const BIOMES = {
+    0: "Stadt", 1: "Ebene", 2: "Wiese", 3: "Hohes Gras", 4: "Metropole", 5: "Wald", 6: "Meer", 7: "Sumpf", 8: "Strand",
+    9: "See", 10: "Meeresgrund", 11: "Berg", 12: "Ödland", 13: "Höhle", 14: "Wüste", 15: "Eishöhle", 16: "Blumenwiese",
+    17: "Kraftwerk", 18: "Vulkan", 19: "Friedhof", 20: "Dojo", 21: "Fabrik", 22: "Ruinen", 23: "Wüstenei", 24: "Abgrund",
+    25: "Weltraum", 26: "Baustelle", 27: "Dschungel", 28: "Feenhöhle", 29: "Tempel", 30: "Slum", 31: "Verschneiter Wald",
+    40: "Insel", 41: "Labor", 50: "Ende",
+  };
+  const biomeName = (id) => BIOMES[id] || `Biom ${id}`;
 
   // ------------------------------------------------------------ 1) Spiel-Instanz abgreifen
   // PokeRogue legt das Spiel nicht global ab. Phaser ruft beim Start aber
@@ -83,7 +96,7 @@
     clearTimeout(saveRunsTimer);
     saveRunsTimer = setTimeout(() => {
       const ids = Object.keys(runs).sort((a, b) => (runs[b].lastSeen || 0) - (runs[a].lastSeen || 0));
-      for (const id of ids.slice(5)) delete runs[id];
+      for (const id of ids.slice(30)) delete runs[id];
       gmSet("runs", runs);
     }, 500);
   };
@@ -106,6 +119,7 @@
   function readGame() {
     const s = getScene();
     if (!s) return null;
+    installHooks(s);
     const mode = safe(() => s.ui.mode, -1);
     const party = safe(() => s.getPlayerParty(), []) || [];
     if (!s.currentBattle || !party.length || !s.seed || mode === UI_MODE.TITLE || mode === UI_MODE.STARTER_SELECT) return null;
@@ -162,6 +176,9 @@
     }
     const alive = party.filter((p) => !safe(() => p.isFainted(), false));
     const over = phase === "GameOverPhase" || alive.length === 0;
+    run.wave = Math.max(run.wave || 0, wave);
+    run.biome = biome;
+    run.over = run.over || over;
 
     saveRuns();
     return {
@@ -177,10 +194,191 @@
         over,
         gameMode: safe(() => s.gameMode.getName?.() || String(s.gameMode.modeId), ""),
         startedAt: run.startedAt,
+        readyWave: run.readyWave || 0,
+        waiting: gate ? { wave: gate.wave, label: gate.label, since: gate.since } : null,
+        catchBlocked: catchStatus(run, wave, biome).allowed ? null : catchStatus(run, wave, biome).reason,
         mons: Object.values(run.mons),
       },
       run,
     };
+  }
+
+  // ------------------------------------------------------------ 3b) Fang-Regeln
+  /** Darf man hier noch fangen? Ein Fang pro 10er-Abschnitt und (Dupe-Klausel) pro Biom-Typ. */
+  function catchStatus(run, wave, biome) {
+    if (!run) return { allowed: true };
+    const seg = Math.ceil(wave / 10);
+    const caught = Object.values(run.mons).filter((m) => m.metWave > 0);
+    if (rule("blockCatchAfterFirst")) {
+      const same = caught.find((m) => Math.ceil(m.metWave / 10) === seg);
+      if (same) return { allowed: false, reason: `In diesem Abschnitt hast du schon ${same.nick || same.name} gefangen.` };
+    }
+    if (rule("biomeDupeClause") && biome >= 0) {
+      const same = caught.find((m) => m.metBiome === biome);
+      if (same) return { allowed: false, reason: `Im Biom ${biomeName(biome)} hast du schon ${same.nick || same.name} gefangen.` };
+    }
+    return { allowed: true };
+  }
+
+  const isCheckpoint = (scene, wave) => wave > 0 && (wave % 10 === 0 || safe(() => !!scene.gameMode.isFixedBattle(wave), false));
+  function checkpointLabel(scene, wave) {
+    if (safe(() => scene.gameMode.isFixedBattle(wave), false)) {
+      const t = safe(() => scene.currentBattle.trainer?.getName?.(), "");
+      return t ? `Kampf gegen ${t}` : "Wichtiger Trainerkampf";
+    }
+    return "Boss am Ende des Bioms";
+  }
+  function partnerReady(wave) {
+    const p = lastResp?.partner;
+    if (!p) return true; // kein Partner im Raum -> nicht warten
+    return (p.readyWave || 0) >= wave || (p.wave || 0) > wave || !!p.over;
+  }
+
+  // ------------------------------------------------------------ 3c) Eingriffe ins Spiel
+  let gate = null; // { wave, label, since, resume }
+  function installHooks(s) {
+    // Ball-Menü sperren, wenn hier nicht mehr gefangen werden darf
+    const ui = s.ui;
+    if (ui && !ui.__soulLink) {
+      ui.__soulLink = true;
+      for (const fn of ["setModeWithoutClear", "setMode", "setOverlayMode"]) {
+        const orig = ui[fn];
+        if (typeof orig !== "function") continue;
+        ui[fn] = function (mode, ...args) {
+          if (mode === UI_MODE.BALL) {
+            const run = runs[String(s.seed)];
+            const st = catchStatus(run, safe(() => s.currentBattle.waveIndex, 0), safe(() => s.arena.biomeType, -1));
+            if (!st.allowed) {
+              toast(`🚫 Fangen gesperrt: ${st.reason}`, "death");
+              return Promise.resolve();
+            }
+          }
+          return orig.call(this, mode, ...args);
+        };
+      }
+    }
+    // Vor Boss / Rivale / Top 4 auf den Partner warten
+    const pm = s.phaseManager;
+    if (pm && !pm.__soulLink && typeof pm.startCurrentPhase === "function") {
+      pm.__soulLink = true;
+      const orig = pm.startCurrentPhase;
+      pm.startCurrentPhase = function () {
+        const name = safe(() => this.currentPhase.phaseName, "");
+        if (ENCOUNTER_PHASES.includes(name)) {
+          const wave = safe(() => s.currentBattle.waveIndex, 0);
+          if (isCheckpoint(s, wave)) {
+            const run = runs[String(s.seed)];
+            if (run) {
+              run.readyWave = Math.max(run.readyWave || 0, wave);
+              saveRuns();
+            }
+            if (rule("waitAtBosses") && !partnerReady(wave)) {
+              const self = this;
+              const args = arguments;
+              gate = { wave, label: checkpointLabel(s, wave), since: Date.now(), resume: () => orig.apply(self, args) };
+              toast(`⏳ ${gate.label} – warte auf deinen Partner …`);
+              syncNow();
+              return;
+            }
+          }
+        }
+        return orig.apply(this, arguments);
+      };
+    }
+  }
+
+  function openGate() {
+    if (!gate) return;
+    const g = gate;
+    gate = null;
+    syncNow();
+    try {
+      g.resume();
+    } catch (e) {
+      console.warn("[SoulLink] Weiter nach Warten fehlgeschlagen", e);
+    }
+  }
+
+  // ------------------------------------------------------------ 3d) Spitznamen-Pflicht
+  let renaming = false;
+  const decodeNick = (b64) => {
+    try {
+      return decodeURIComponent(escape(atob(b64)));
+    } catch {
+      return String(b64 || "");
+    }
+  };
+  function needsNick(p) {
+    const n = safe(() => p.nickname, "");
+    if (!n) return true;
+    const d = decodeNick(n).trim();
+    return !d || d.toLowerCase() === String(safe(() => p.name, "")).toLowerCase();
+  }
+  function tryForceRename(state) {
+    if (renaming || !rule("forceNickname")) return;
+    const { scene, party, phase, mode, run } = state;
+    const calm =
+      (phase === "CommandPhase" && mode === UI_MODE.COMMAND) || (phase === "SelectModifierPhase" && mode === UI_MODE.MODIFIER_SELECT);
+    if (!calm) return;
+    const p = party.find((x) => {
+      const r = run.mons[x.id];
+      return r && r.metWave > 0 && r.status === "alive" && !r.nickDone && needsNick(x);
+    });
+    if (!p) return;
+    const ui = scene.ui;
+    renaming = true;
+    toast(`✏️ Gib ${safe(() => p.name, "deinem Fang")} einen Spitznamen!`);
+    const done = () => ui.revertMode().finally(() => (renaming = false));
+    try {
+      ui.setOverlayMode(
+        UI_MODE.RENAME_POKEMON,
+        {
+          buttonActions: [
+            (b64) => {
+              const name = decodeNick(b64).trim();
+              if (!name || name.toLowerCase() === String(p.name).toLowerCase()) {
+                toast("Bitte einen echten Spitznamen eingeben, nicht den Pokémon-Namen.", "death");
+                return done();
+              }
+              p.nickname = b64;
+              safe(() => p.updateInfo());
+              run.mons[p.id].nickDone = true;
+              run.mons[p.id].nick = name;
+              saveRuns();
+              syncNow();
+              return done();
+            },
+            () => {
+              toast("Spitzname ist Pflicht! 😤", "death");
+              return done();
+            },
+          ],
+        },
+        p,
+      );
+    } catch (e) {
+      renaming = false;
+      console.warn("[SoulLink] Umbenennen-Fenster ging nicht auf", e);
+    }
+  }
+
+  // ------------------------------------------------------------ 3e) Verlauf für Statistiken
+  function historyFor(currentId) {
+    return Object.values(runs)
+      .filter((r) => r.runId !== currentId && Object.keys(r.mons || {}).length)
+      .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))
+      .slice(0, 30)
+      .map((r) => ({
+        runId: r.runId,
+        startedAt: r.startedAt,
+        endedAt: r.lastSeen,
+        wave: r.wave || 0,
+        over: !!r.over,
+        mons: Object.values(r.mons).map((m) => ({
+          name: m.name, nick: m.nick, speciesId: m.speciesId, shiny: m.shiny, level: m.level, status: m.status,
+          metWave: m.metWave, metBiome: m.metBiome, diedWave: m.diedWave ?? null, diedBiome: m.diedBiome ?? null,
+        })),
+      }));
   }
 
   // ------------------------------------------------------------ 4) Automatisch freilassen
@@ -283,6 +481,7 @@
         player: cfg.player,
         secret: cfg.secret,
         run: state ? state.data : null,
+        history: historyFor(state?.data.runId),
       });
       lastError = "";
     } catch (e) {
@@ -319,6 +518,10 @@
     .collapsed .body { display: none; }
     .warn { background: #3a1820; border: 1px solid #6b2433; color: #ffd0d8; padding: 6px 8px; border-radius: 8px; margin: 4px 0; line-height: 1.35; }
     .hint { background: #2e2715; border-color: #5e4c1c; color: #ffe7a8; }
+    .gate { background: #15253a; border-color: #2b4d78; color: #d6e8ff; font-size: 13px; }
+    .skip { display: block; margin-top: 6px; font-size: 11px; color: #9fb7d8; text-decoration: underline; padding: 0; }
+    .pill { margin: 4px 0; padding: 5px 8px; border-radius: 8px; font-size: 11px; line-height: 1.35; }
+    .pill.yes { background: #14291f; color: #a6f0c6; } .pill.no { background: #2a1a1d; color: #ffb3bf; }
     .row { display: grid; grid-template-columns: 1fr 18px 1fr; align-items: center; gap: 4px; padding: 4px; border-radius: 8px; margin: 3px 0;
       background: #1b1f2d; border-left: 3px solid #3ddc84; }
     .row.dead { border-left-color: #ff5c5c; opacity: .75; } .row.broken { border-left-color: #8a8fa3; opacity: .7; }
@@ -416,6 +619,18 @@
       }
       for (const w of lastResp?.warnings || []) body += `<div class="warn hint">⚠️ ${esc(w.text)}</div>`;
       if (currentRun?.data.over) body += `<div class="warn">☠️ Run vorbei.</div>`;
+      if (gate) {
+        const who = lastResp?.partner?.name || "deinen Partner";
+        const where = lastResp?.partner?.wave ? ` (ist bei Welle ${lastResp.partner.wave})` : "";
+        body += `<div class="warn gate">⏳ <b>${esc(gate.label)}</b> auf Welle ${gate.wave}<br>Warte auf ${esc(who)}${esc(where)} …
+          <button class="skip" data-a="skipwait">Nicht warten, weiter</button></div>`;
+      }
+      if (currentRun) {
+        const blockedCatch = currentRun.data.catchBlocked;
+        body += blockedCatch
+          ? `<div class="pill no">🚫 Fangen gesperrt – ${esc(blockedCatch)}</div>`
+          : `<div class="pill yes">🎯 Hier darfst du noch fangen</div>`;
+      }
       const pairs = (lastResp?.pairs || []).slice().reverse();
       for (const p of pairs) {
         body += `<div class="row ${p.state}"><div class="lbl">${esc(p.title)}</div>
@@ -444,6 +659,10 @@
       showSettings = !showSettings;
       cfg.collapsed = false;
       render();
+    } else if (a === "skipwait") {
+      toast("Weiter ohne Partner.");
+      openGate();
+      render();
     }
   }
 
@@ -469,8 +688,13 @@
     const state = safe(readGame, null);
     currentRun = state;
     await sync(state);
+    if (gate && partnerReady(gate.wave)) {
+      toast(`✅ ${lastResp?.partner?.name || "Partner"} ist da – los geht's!`);
+      openGate();
+    }
     if (state) await tryRelease(state);
-    const key = JSON.stringify([lastResp, lastError, !!game, !!state, state?.data.over, [...blocked]]);
+    if (state) tryForceRename(state);
+    const key = JSON.stringify([lastResp, lastError, !!game, !!state, state?.data.over, state?.data.catchBlocked, gate?.wave, [...blocked]]);
     const focused = root && root.activeElement && root.activeElement.tagName === "INPUT";
     if (key !== renderKey && !focused) {
       renderKey = key;

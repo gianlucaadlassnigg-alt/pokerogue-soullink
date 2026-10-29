@@ -19,6 +19,11 @@ Soul-Link-Nuzlocke für zwei Spieler auf **pokerogue.net**:
 | **KO = tot** | Sobald ein Pokémon KO geht, gilt es als tot, auch wenn es später wiederbelebt wird. |
 | **Partner stirbt** | Dein verlinktes Pokémon wird freigelassen. |
 | **Partner fängt nichts** | Ist der Partner schon über den Abschnitt hinaus und hat dort nichts gefangen, geht dein Fang aus dem Abschnitt auch. |
+| **Spitznamen-Pflicht** | Nach jedem Fang geht automatisch das Umbenennen-Fenster auf. Abbrechen oder den normalen Pokémon-Namen nehmen geht nicht. |
+| **Fangsperre** | Nach dem ersten Fang im Abschnitt lässt sich das Ball-Menü nicht mehr öffnen. |
+| **Biom-Klausel** | Hast du in einem Biom schon gefangen, darfst du dort später nicht mehr fangen, auch wenn du wieder hinkommst. |
+| **Warten auf den Partner** | Vor dem Boss am Ende jedes Bioms (jede 10. Welle), vor Rivalen, Top 4 und Champ hält das Spiel an, bis der Partner auch dort ist. Im Overlay gibt es „Nicht warten, weiter“, falls er offline ist. |
+| **Statistiken** | Die Website zeigt Runs, beste Welle, Fänge, Tode, längsten Überlebenden, höchstes Level und das tödlichste Biom. |
 
 Jede Regel könnt ihr auf der Website unter **Regeln** mit dem Raum-Passwort an- und ausschalten.
 

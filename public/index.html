@@ -91,6 +91,23 @@
   .steps li::before { content: counter(s); flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--bg2); border: 1px solid var(--line); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
   code { font-family: "JetBrains Mono", monospace; font-size: 13px; background: var(--bg2); padding: 1px 6px; border-radius: 6px; }
 
+  .status { margin-top: 10px; font-size: 13px; font-weight: 700; display: inline-block; padding: 3px 9px; border-radius: 99px; background: var(--bg2); }
+  .status.wait { color: #9fd0ff; } .status.no { color: #ffb3bf; } .status.yes { color: #a6f0c6; }
+  .pcard .status + .status { margin-left: 6px; }
+  .cmp { width: 100%; border-collapse: collapse; font-size: 15px; }
+  .cmp th, .cmp td { padding: 8px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+  .cmp thead th { font-size: 16px; font-weight: 800; }
+  .cmp tbody th { text-align: left; color: var(--muted); font-weight: 500; }
+  .cmp td { font-family: "JetBrains Mono", monospace; }
+  .cmp td.lead { color: var(--alive); font-weight: 700; }
+  .cmp td.lead::before { content: "▲ "; font-size: 10px; }
+  .cmp tr:last-child th, .cmp tr:last-child td { border-bottom: 0; }
+  .hls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .hl { background: var(--bg2); border-radius: 12px; padding: 10px 12px; border-top: 3px solid var(--pc); }
+  .hlname { font-weight: 800; margin-bottom: 6px; color: var(--pc); }
+  .hlrow { display: flex; flex-direction: column; gap: 1px; padding: 5px 0; font-size: 12px; color: var(--muted); }
+  .hlrow b { color: var(--text); font-size: 14px; display: flex; align-items: center; gap: 4px; }
+  .hlrow img { width: 28px; height: 28px; image-rendering: pixelated; margin: -6px 0; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .side { position: static; } }
   @media (max-width: 620px) {
     .players { grid-template-columns: 1fr 1fr; } .vs { display: none; }
@@ -98,6 +115,7 @@
     .sprite, .sprite img { width: 44px; height: 44px; }
     .mname { font-size: 14px; } .mid .s { display: none; }
     .logo { font-size: 24px; }
+    .hls { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -113,6 +131,10 @@ const sprite = (m) => m && m.speciesId > 0 && m.speciesId <= 1025
   ? `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${m.shiny ? "shiny/" : ""}${m.speciesId}.png` : "";
 const ago = (ts) => { const s = Math.round((Date.now() - ts) / 1000); if (s < 60) return `${s}s`; if (s < 3600) return `${Math.round(s/60)} min`; if (s < 86400) return `${Math.round(s/3600)} h`; return `${Math.round(s/86400)} T`; };
 const RULES = {
+  forceNickname: "Nach dem Fangen muss ein Spitzname vergeben werden",
+  blockCatchAfterFirst: "Nach dem ersten Fang im Abschnitt ist das Ball-Menü gesperrt",
+  biomeDupeClause: "In einem Biom, in dem man schon gefangen hat, darf man später nicht mehr fangen",
+  waitAtBosses: "Vor Biom-Boss, Rivale, Top 4 und Champ auf den Partner warten",
   releaseOnPartnerDeath: "Partner-Pokémon stirbt → eigenes wird freigelassen",
   releaseOnPartnerGone: "Partner lässt frei / verliert sein Pokémon → eigenes auch",
   releaseIfPartnerMissed: "Partner fängt im Abschnitt nichts → eigenes Pokémon geht",
@@ -187,7 +209,46 @@ function playerCard(p, side) {
   return `<div class="pcard ${side ? "right" : ""}" style="--pc:${color}">
     <div class="pname">${side ? "" : `<span class="online ${p.online ? "on" : ""}"></span>`}${esc(p.name)}${side ? `<span class="online ${p.online ? "on" : ""}"></span>` : ""}</div>
     <div class="pmeta">${meta} · ${p.online ? "spielt gerade" : "zuletzt vor " + ago(p.lastSeen)}</div>
-    <div class="stats"><div><b>${p.run?.wave ?? 0}</b>Welle</div><div><b>${alive}</b>im Team</div><div><b>${dead}</b>tot</div></div></div>`;
+    <div class="stats"><div><b>${p.run?.wave ?? 0}</b>Welle</div><div><b>${alive}</b>im Team</div><div><b>${dead}</b>tot</div></div>
+    ${p.run?.waiting ? `<div class="status wait">⏳ Wartet vor „${esc(p.run.waiting.label)}“ (Welle ${p.run.waiting.wave})</div>` : ""}
+    ${p.run && !p.run.over ? (p.run.catchBlocked ? `<div class="status no">🚫 Fangen gesperrt</div>` : `<div class="status yes">🎯 Darf hier fangen</div>`) : ""}</div>`;
+}
+
+function statsBlock(A, B) {
+  const players = [A, B].filter(Boolean);
+  if (!players.length || !players.some(p => p.stats?.runs)) return "";
+  const rows = [
+    ["Runs", "runs", 0],
+    ["Beste Welle", "bestWave", 1],
+    ["Ø Welle", "avgWave", 1],
+    ["Fänge", "catches", 1],
+    ["Tode", "deaths", -1],
+    ["Tode pro Run", "deathsPerRun", -1],
+    ["Shinys", "shinies", 1],
+  ];
+  const cell = (p, key, better) => {
+    const v = p?.stats?.[key] ?? 0;
+    let lead = false;
+    if (players.length === 2 && better) {
+      const o = (p === A ? B : A)?.stats?.[key] ?? 0;
+      lead = better > 0 ? v > o : v < o;
+    }
+    return `<td class="${lead ? "lead" : ""}">${v}</td>`;
+  };
+  const card = (p, side) => {
+    if (!p) return "";
+    const s = p.stats || {};
+    const color = side ? "var(--b)" : "var(--a)";
+    const mini = (m) => m && m.speciesId > 0 && m.speciesId <= 1025 ? `<img src="${sprite(m)}" alt="" onerror="this.remove()">` : "";
+    return `<div class="hl" style="--pc:${color}"><div class="hlname">${esc(p.name)}</div>
+      <div class="hlrow"><span>🏆 Längster Überlebender</span><b>${s.survivor ? `${mini(s.survivor)}${esc(s.survivor.name)} · ${s.survivor.waves} Wellen` : "–"}</b></div>
+      <div class="hlrow"><span>💪 Höchstes Level</span><b>${s.topLevel ? `${mini(s.topLevel)}${esc(s.topLevel.name)} · Lv ${s.topLevel.level}` : "–"}</b></div>
+      <div class="hlrow"><span>☠️ Tödlichstes Biom</span><b>${s.deadliestBiome ? `${esc(s.deadliestBiome.name)} · ${s.deadliestBiome.count}×` : "–"}</b></div></div>`;
+  };
+  return `<h2 style="margin-top:28px">Statistiken · alle Runs</h2>
+    <div class="box"><table class="cmp"><thead><tr><th></th>${players.map((p, i) => `<th style="color:${i ? "var(--b)" : "var(--a)"}">${esc(p.name)}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map(([label, key, better]) => `<tr><th>${label}</th>${players.map(p => cell(p, key, better)).join("")}</tr>`).join("")}</tbody></table>
+      <div class="hls">${card(A, 0)}${card(B, 1)}</div></div>`;
 }
 
 let settingsOpen = false;
@@ -214,12 +275,13 @@ function render() {
             <div class="mid"><div class="t">${esc(p.title)}</div><div class="chain">${p.state === "dead" ? "✖" : p.state === "broken" ? "⛓️‍💥" : "⛓"}</div><div class="s">${esc(p.sub)}</div></div>
             ${monBlock(p.slots[1], true)}
           </div>`).join("") : `<div class="box empty">Sobald ihr Starter wählt, erscheinen hier die Paare.</div>`}</div>
+        ${statsBlock(A, B)}
       </section>
       <aside class="side">
         <div><h2>Live-Feed</h2><div class="box"><ul class="feed">${data.events.length ? data.events.map(e => `
           <li class="${e.type}"><span class="time">${ago(e.ts)}</span> ${e.player ? `<span class="who" style="color:${e.player === A?.name ? "var(--a)" : "var(--b)"}">${esc(e.player)}</span> ` : ""}${esc(e.text)}</li>`).join("") : `<li class="empty">Noch nichts passiert.</li>`}</ul></div></div>
         <div><h2>Friedhof · ${graves.length}</h2><div class="box grave">${graves.length ? graves.map(p => `<div>🪦 ${p.slots.map(s => esc(s.mon ? (s.mon.nick || s.mon.name) : "–")).join(" ⛓ ")} <span class="msub">· ${esc(p.title)}</span></div>`).join("") : `<span class="empty">Noch niemand. Bleibt so.</span>`}</div></div>
-        ${data.history.length ? `<div><h2>Frühere Runs</h2><div class="box grave">${data.history.slice(0, 10).map(h => `<div><b>${esc(h.player)}</b>&nbsp;bis Welle ${h.wave} · ${esc(h.biomeName)} <span class="msub">· vor ${ago(h.endedAt)}</span></div>`).join("")}</div></div>` : ""}
+        ${data.history.length ? `<div><h2>Frühere Runs</h2><div class="box grave">${data.history.slice(0, 10).map(h => `<div><b style="color:${h.player === A?.name ? "var(--a)" : "var(--b)"}">${esc(h.player)}</b>&nbsp;bis Welle ${h.wave} · ${h.deaths} tot <span class="msub">· vor ${ago(h.endedAt)}</span></div>`).join("")}</div></div>` : ""}
         <div><h2>Regeln</h2><div class="box" id="settings">
           <details ${settingsOpen ? "open" : ""}><summary>Regeln anzeigen / ändern</summary>
             <div class="toggles">${Object.entries(RULES).map(([k, t]) => `<label><input type="checkbox" name="${k}" ${data.settings[k] ? "checked" : ""}> ${t}</label>`).join("")}</div>
